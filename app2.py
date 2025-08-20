@@ -39,6 +39,27 @@ def annotate_image(image, detections):
     annotated_image = sv.LabelAnnotator(color_lookup=sv.ColorLookup.INDEX, text_scale=text_scale, smart_position=True).annotate(scene=annotated_image, detections=detections, labels=labels)
     return annotated_image
 
+
+def _get_det_field(detections, key): #FIXME find the right one and remove try/catch
+    """Robustly get a field from detections as a plain Python list.
+    Try attribute access, then item access, then fall back to empty list.
+    """
+    # try attribute
+    try:
+        val = getattr(detections, key)
+    except Exception:
+        try:
+            val = detections[key]
+        except Exception:
+            return []
+    # convert to plain Python list if possible
+    try:
+        if hasattr(val, 'tolist'):
+            return val.tolist()
+        return list(val)
+    except Exception:
+        return val
+
 def yoloe_inference(image, texts, model_id, image_size, conf_thresh, iou_thresh):
     model = init_model(model_id)
     model.set_classes(texts, model.get_text_pe(texts))
@@ -93,9 +114,9 @@ def process_entire_video(video, texts, model_id, image_size, conf_thresh, iou_th
         # Save bboxes, class names, confidences as JSON
         frame_result = {
             "frame": frame_idx,
-            "bboxes": detections.xyxy.tolist() if hasattr(detections, 'xyxy') else [],
-            "class_name": detections['class_name'] if 'class_name' in detections else [],
-            "confidence": detections.confidence.tolist() if hasattr(detections, 'confidence') else [],
+            "bboxes": _get_det_field(detections, 'xyxy'),
+            "class_name": _get_det_field(detections, 'class_name'),
+            "confidence": _get_det_field(detections, 'confidence'),
         }
         all_results.append(frame_result)
         frame_idx += 1
@@ -215,9 +236,9 @@ def app2():
                 mask_out.write(mask_frame)
                 frame_result = {
                     "frame": frame_idx,
-                    "bboxes": detections.xyxy.tolist() if hasattr(detections, 'xyxy') else [],
-                    "class_name": detections['class_name'] if 'class_name' in detections else [],
-                    "confidence": detections.confidence.tolist() if hasattr(detections, 'confidence') else [],
+                    "bboxes": _get_det_field(detections, 'xyxy'),
+                    "class_name": _get_det_field(detections, 'class_name'),
+                    "confidence": _get_det_field(detections, 'confidence'),
                 }
                 all_results.append(frame_result)
                 frame_idx += 1
@@ -288,9 +309,9 @@ def app2():
                 mask_out.write(mask_frame)
                 frame_result = {
                     "frame": frame_idx,
-                    "bboxes": detections.xyxy.tolist() if hasattr(detections, 'xyxy') else [],
-                    "class_name": detections['class_name'] if 'class_name' in detections else [],
-                    "confidence": detections.confidence.tolist() if hasattr(detections, 'confidence') else [],
+                    "bboxes": _get_det_field(detections, 'xyxy'),
+                    "class_name": _get_det_field(detections, 'class_name'),
+                    "confidence": _get_det_field(detections, 'confidence'),
                 }
                 all_results.append(frame_result)
                 frame_idx += 1
