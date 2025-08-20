@@ -80,7 +80,17 @@ def app2():
         with gr.Row():
             with gr.Column():
                 video_input = gr.Video(label="Upload Video", interactive=True)
-                texts = gr.Textbox(label="Input Texts", value='person,bus', placeholder='person,bus', interactive=True)
+                with gr.Tab("Text"):
+                    texts = gr.Textbox(label="Input Texts", value='person,bus', placeholder='person,bus', interactive=True)
+                    run_first_frame_text = gr.Button(value="Run on First Frame (Text)")
+                    run_full_video_text = gr.Button(value="Run on Entire Video (Text)")
+                with gr.Tab("Visual"):
+                    visual_prompt_type = gr.Dropdown(choices=["bboxes", "masks"], value="bboxes", label="Visual Type", interactive=True)
+                    run_first_frame_visual = gr.Button(value="Run on First Frame (Visual)")
+                    run_full_video_visual = gr.Button(value="Run on Entire Video (Visual)")
+                with gr.Tab("Prompt-Free"):
+                    run_first_frame_pf = gr.Button(value="Run on First Frame (Prompt-Free)")
+                    run_full_video_pf = gr.Button(value="Run on Entire Video (Prompt-Free)")
                 model_id = gr.Dropdown(
                     label="Model",
                     choices=["yoloe-v8s", "yoloe-v8m", "yoloe-v8l", "yoloe-11s", "yoloe-11m", "yoloe-11l"],
@@ -89,19 +99,123 @@ def app2():
                 image_size = gr.Slider(label="Image Size", minimum=320, maximum=1280, step=32, value=640)
                 conf_thresh = gr.Slider(label="Confidence Threshold", minimum=0.0, maximum=1.0, step=0.05, value=0.25)
                 iou_thresh = gr.Slider(label="IoU Threshold", minimum=0.0, maximum=1.0, step=0.05, value=0.70)
-                run_first_frame = gr.Button(value="Run on First Frame")
-                run_full_video = gr.Button(value="Run on Entire Video")
             with gr.Column():
                 output_image = gr.Image(type="numpy", label="Annotated First Frame")
                 output_video = gr.Video(label="Annotated Video")
-        run_first_frame.click(
+
+        # Text prompt handlers
+        run_first_frame_text.click(
             fn=process_first_frame,
             inputs=[video_input, texts, model_id, image_size, conf_thresh, iou_thresh],
             outputs=[output_image],
         )
-        run_full_video.click(
+        run_full_video_text.click(
             fn=process_entire_video,
             inputs=[video_input, texts, model_id, image_size, conf_thresh, iou_thresh],
+            outputs=[output_video],
+        )
+
+        # Visual prompt handlers
+        def process_first_frame_visual(video, visual_prompt_type, model_id, image_size, conf_thresh, iou_thresh):
+            first_frame = extract_first_frame(video)
+            # For demo, just run with dummy bbox/mask prompt
+            if visual_prompt_type == "bboxes":
+                # Dummy bbox: whole image
+                w, h = first_frame.size
+                bboxes = np.array([[0, 0, w, h]])
+                prompts = {"bboxes": bboxes, "cls": np.array([0])}
+            else:
+                mask = np.ones((first_frame.size[1], first_frame.size[0]), dtype=np.uint8)
+                prompts = {"masks": mask[None], "cls": np.array([0])}
+            model = init_model(model_id)
+            results = model.predict(source=first_frame, imgsz=image_size, conf=conf_thresh, iou=iou_thresh, prompts=prompts)
+            detections = sv.Detections.from_ultralytics(results[0])
+            return annotate_image(first_frame, detections)
+
+        def process_entire_video_visual(video, visual_prompt_type, model_id, image_size, conf_thresh, iou_thresh):
+            cap = cv2.VideoCapture(video)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            temp_out = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+            out = cv2.VideoWriter(temp_out.name, fourcc, fps, (width, height))
+            model = init_model(model_id)
+            # Dummy prompt for all frames
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                if visual_prompt_type == "bboxes":
+                    w, h = pil_img.size
+                    bboxes = np.array([[0, 0, w, h]])
+                    prompts = {"bboxes": bboxes, "cls": np.array([0])}
+                else:
+                    mask = np.ones((pil_img.size[1], pil_img.size[0]), dtype=np.uint8)
+                    prompts = {"masks": mask[None], "cls": np.array([0])}
+                results = model.predict(source=pil_img, imgsz=image_size, conf=conf_thresh, iou=iou_thresh, prompts=prompts)
+                detections = sv.Detections.from_ultralytics(results[0])
+                annotated = annotate_image(pil_img, detections)
+                annotated_np = cv2.cvtColor(np.array(annotated), cv2.COLOR_RGB2BGR)
+                out.write(annotated_np)
+            cap.release()
+            out.release()
+            return temp_out.name
+
+        run_first_frame_visual.click(
+            fn=process_first_frame_visual,
+            inputs=[video_input, visual_prompt_type, model_id, image_size, conf_thresh, iou_thresh],
+            outputs=[output_image],
+        )
+        run_full_video_visual.click(
+            fn=process_entire_video_visual,
+            inputs=[video_input, visual_prompt_type, model_id, image_size, conf_thresh, iou_thresh],
+            outputs=[output_video],
+        )
+
+        # Prompt-Free handlers
+        def process_first_frame_pf(video, model_id, image_size, conf_thresh, iou_thresh):
+            first_frame = extract_first_frame(video)
+            with open('tools/ram_tag_list.txt', 'r') as f:
+                texts = [x.strip() for x in f.readlines()]
+            annotated = yoloe_inference(first_frame, texts, model_id, image_size, conf_thresh, iou_thresh)
+            return annotated
+
+        def process_entire_video_pf(video, model_id, image_size, conf_thresh, iou_thresh):
+            cap = cv2.VideoCapture(video)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            temp_out = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+            out = cv2.VideoWriter(temp_out.name, fourcc, fps, (width, height))
+            with open('tools/ram_tag_list.txt', 'r') as f:
+                texts = [x.strip() for x in f.readlines()]
+            model = init_model(model_id)
+            model.set_classes(texts, model.get_text_pe(texts))
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                results = model.predict(source=pil_img, imgsz=image_size, conf=conf_thresh, iou=iou_thresh)
+                detections = sv.Detections.from_ultralytics(results[0])
+                annotated = annotate_image(pil_img, detections)
+                annotated_np = cv2.cvtColor(np.array(annotated), cv2.COLOR_RGB2BGR)
+                out.write(annotated_np)
+            cap.release()
+            out.release()
+            return temp_out.name
+
+        run_first_frame_pf.click(
+            fn=process_first_frame_pf,
+            inputs=[video_input, model_id, image_size, conf_thresh, iou_thresh],
+            outputs=[output_image],
+        )
+        run_full_video_pf.click(
+            fn=process_entire_video_pf,
+            inputs=[video_input, model_id, image_size, conf_thresh, iou_thresh],
             outputs=[output_video],
         )
 
