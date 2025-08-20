@@ -59,8 +59,12 @@ def process_entire_video(video, texts, model_id, image_size, conf_thresh, iou_th
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     temp_out = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
     out = cv2.VideoWriter(temp_out.name, fourcc, fps, (width, height))
+    result_file = tempfile.NamedTemporaryFile(delete=False, suffix='.msgpack')
+    import msgpack
+    all_results = []
     model = init_model(model_id)
     model.set_classes([t.strip() for t in texts.split(',')], model.get_text_pe([t.strip() for t in texts.split(',')]))
+    frame_idx = 0
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -71,9 +75,21 @@ def process_entire_video(video, texts, model_id, image_size, conf_thresh, iou_th
         annotated = annotate_image(pil_img, detections)
         annotated_np = cv2.cvtColor(np.array(annotated), cv2.COLOR_RGB2BGR)
         out.write(annotated_np)
+        # Save mask and bbox info (as numpy arrays, convert to bytes for msgpack)
+        frame_result = {
+            "frame": frame_idx,
+            "bboxes": np.array(detections.xyxy).astype(np.float32).tobytes() if hasattr(detections, 'xyxy') else b'',
+            "masks": np.array(detections.mask).astype(np.uint8).tobytes() if hasattr(detections, 'mask') and detections.mask is not None else b'',
+            "class_name": detections['class_name'] if 'class_name' in detections else [],
+            "confidence": np.array(detections.confidence).astype(np.float32).tobytes() if hasattr(detections, 'confidence') else b'',
+        }
+        all_results.append(frame_result)
+        frame_idx += 1
     cap.release()
     out.release()
-    return temp_out.name
+    with open(result_file.name, 'wb') as f:
+        f.write(msgpack.packb(all_results))
+    return temp_out.name, result_file.name
 
 def app2():
     with gr.Blocks():
@@ -102,6 +118,7 @@ def app2():
             with gr.Column():
                 output_image = gr.Image(type="numpy", label="Annotated First Frame")
                 output_video = gr.Video(label="Annotated Video")
+                output_json = gr.File(label="Download Results File")
 
         # Text prompt handlers
         run_first_frame_text.click(
@@ -112,7 +129,7 @@ def app2():
         run_full_video_text.click(
             fn=process_entire_video,
             inputs=[video_input, texts, model_id, image_size, conf_thresh, iou_thresh],
-            outputs=[output_video],
+            outputs=[output_video, output_json],
         )
 
         # Visual prompt handlers
@@ -140,8 +157,11 @@ def app2():
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             temp_out = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
             out = cv2.VideoWriter(temp_out.name, fourcc, fps, (width, height))
+            result_file = tempfile.NamedTemporaryFile(delete=False, suffix='.msgpack')
+            import msgpack
+            all_results = []
             model = init_model(model_id)
-            # Dummy prompt for all frames
+            frame_idx = 0
             while True:
                 ret, frame = cap.read()
                 if not ret:
@@ -159,9 +179,20 @@ def app2():
                 annotated = annotate_image(pil_img, detections)
                 annotated_np = cv2.cvtColor(np.array(annotated), cv2.COLOR_RGB2BGR)
                 out.write(annotated_np)
+                frame_result = {
+                    "frame": frame_idx,
+                    "bboxes": np.array(detections.xyxy).astype(np.float32).tobytes() if hasattr(detections, 'xyxy') else b'',
+                    "masks": np.array(detections.mask).astype(np.uint8).tobytes() if hasattr(detections, 'mask') and detections.mask is not None else b'',
+                    "class_name": detections['class_name'] if 'class_name' in detections else [],
+                    "confidence": np.array(detections.confidence).astype(np.float32).tobytes() if hasattr(detections, 'confidence') else b'',
+                }
+                all_results.append(frame_result)
+                frame_idx += 1
             cap.release()
             out.release()
-            return temp_out.name
+            with open(result_file.name, 'wb') as f:
+                f.write(msgpack.packb(all_results))
+            return temp_out.name, result_file.name
 
         run_first_frame_visual.click(
             fn=process_first_frame_visual,
@@ -171,7 +202,7 @@ def app2():
         run_full_video_visual.click(
             fn=process_entire_video_visual,
             inputs=[video_input, visual_prompt_type, model_id, image_size, conf_thresh, iou_thresh],
-            outputs=[output_video],
+            outputs=[output_video, output_json],
         )
 
         # Prompt-Free handlers
@@ -190,10 +221,14 @@ def app2():
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             temp_out = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
             out = cv2.VideoWriter(temp_out.name, fourcc, fps, (width, height))
+            result_file = tempfile.NamedTemporaryFile(delete=False, suffix='.msgpack')
+            import msgpack
+            all_results = []
             with open('tools/ram_tag_list.txt', 'r') as f:
                 texts = [x.strip() for x in f.readlines()]
             model = init_model(model_id)
             model.set_classes(texts, model.get_text_pe(texts))
+            frame_idx = 0
             while True:
                 ret, frame = cap.read()
                 if not ret:
@@ -204,9 +239,20 @@ def app2():
                 annotated = annotate_image(pil_img, detections)
                 annotated_np = cv2.cvtColor(np.array(annotated), cv2.COLOR_RGB2BGR)
                 out.write(annotated_np)
+                frame_result = {
+                    "frame": frame_idx,
+                    "bboxes": np.array(detections.xyxy).astype(np.float32).tobytes() if hasattr(detections, 'xyxy') else b'',
+                    "masks": np.array(detections.mask).astype(np.uint8).tobytes() if hasattr(detections, 'mask') and detections.mask is not None else b'',
+                    "class_name": detections['class_name'] if 'class_name' in detections else [],
+                    "confidence": np.array(detections.confidence).astype(np.float32).tobytes() if hasattr(detections, 'confidence') else b'',
+                }
+                all_results.append(frame_result)
+                frame_idx += 1
             cap.release()
             out.release()
-            return temp_out.name
+            with open(result_file.name, 'wb') as f:
+                f.write(msgpack.packb(all_results))
+            return temp_out.name, result_file.name
 
         run_first_frame_pf.click(
             fn=process_first_frame_pf,
@@ -216,7 +262,7 @@ def app2():
         run_full_video_pf.click(
             fn=process_entire_video_pf,
             inputs=[video_input, model_id, image_size, conf_thresh, iou_thresh],
-            outputs=[output_video],
+            outputs=[output_video, output_json],
         )
 
 gradio_app2 = gr.Blocks()
