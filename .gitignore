@@ -173,3 +173,5 @@ calibration_*.npy
 ignore
 exports
 pretrain
+/gradio
+/gradio2
