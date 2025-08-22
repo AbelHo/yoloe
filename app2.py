@@ -8,6 +8,8 @@ from huggingface_hub import hf_hub_download
 from PIL import Image
 import tempfile
 import os
+import argparse
+import random
 
 def init_model(model_id):
     filename = f"{model_id}-seg.pt"
@@ -78,10 +80,14 @@ def process_entire_video(video, texts, model_id, image_size, conf_thresh, iou_th
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    temp_out = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+    base = os.path.splitext(os.path.basename(video))[0]
+    temp_out = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4', prefix=f"{base}_annotated_")
+    result_file = tempfile.NamedTemporaryFile(delete=False, suffix='.json', prefix=f"{base}_results_")
+    mask_video_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mkv', prefix=f"{base}_mask_")
+    # model_save_path = tempfile.NamedTemporaryFile(delete=False, suffix='.pt')#, prefix=f"{base}_model-{model_id}_")
+    model_save_path = f"/tmp/{base}_model-{model_id}_" + ''.join(random.choices('qwertyuiopasdfghjklzxcvbnmm1234567890', k=8)) + '.pt'
+
     out = cv2.VideoWriter(temp_out.name, fourcc, fps, (width, height))
-    result_file = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
-    mask_video_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mkv')
     import json
     all_results = []
     model = init_model(model_id)
@@ -123,14 +129,30 @@ def process_entire_video(video, texts, model_id, image_size, conf_thresh, iou_th
     cap.release()
     out.release()
     mask_out.release()
+    param_settings = {
+        "model_id": model_id,
+        "image_size": image_size,
+        "conf_thresh": conf_thresh,
+        "iou_thresh": iou_thresh,
+        "prompt_type": "Text",
+        "texts": texts
+    }
     with open(result_file.name, 'w') as f:
-        json.dump(all_results, f)
-    return temp_out.name, result_file.name, mask_video_file.name
-    cap.release()
-    out.release()
-    with open(result_file.name, 'wb') as f:
-        f.write(msgpack.packb(all_results))
-    return temp_out.name, result_file.name
+        json.dump({"results": all_results, "params": param_settings}, f)
+    # Save model weights for download
+    # model_save_path = f"{model_id}_used.pt"
+    # model_save_path = "/tmp/aowief.pt"#tempfile.NamedTemporaryFile(delete=False, suffix='.pt')
+    if hasattr(model, 'save'):
+        model.save(model_save_path)
+    elif hasattr(model, 'state_dict'):
+        torch.save(model.state_dict(), model_save_path)
+    else:
+        # fallback: try saving the underlying model
+        try:
+            torch.save(model.model.state_dict(), model_save_path)
+        except Exception:
+            model_save_path = None
+    return temp_out.name, result_file.name, mask_video_file.name, model_save_path
 
 def app2():
     with gr.Blocks():
@@ -161,6 +183,7 @@ def app2():
                 output_video = gr.Video(label="Annotated Video")
                 output_json = gr.File(label="Download Results File (JSON)")
                 output_mask_video = gr.File(label="Download Mask Video (MKV)")
+                output_model_file = gr.File(label="Download Model Weights (PT)")
 
         # Text prompt handlers
         run_first_frame_text.click(
@@ -171,7 +194,7 @@ def app2():
         run_full_video_text.click(
             fn=process_entire_video,
             inputs=[video_input, texts, model_id, image_size, conf_thresh, iou_thresh],
-            outputs=[output_video, output_json, output_mask_video],
+            outputs=[output_video, output_json, output_mask_video, output_model_file],
         )
 
         # Visual prompt handlers
@@ -197,13 +220,17 @@ def app2():
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            temp_out = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+            base = os.path.splitext(os.path.basename(video))[0]
+            temp_out = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4', prefix=f"{base}_annotated_")
+            result_file = tempfile.NamedTemporaryFile(delete=False, suffix='.json', prefix=f"{base}_results_")
+            mask_video_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mkv', prefix=f"{base}_mask_")
+            model_save_path = f"/tmp/{base}_model-{model_id}_" + ''.join(random.choices('qwertyuiopasdfghjklzxcvbnmm1234567890', k=8)) + '.pt'
+            # model_save_path = tempfile.NamedTemporaryFile(delete=False, suffix='.pt', prefix=f"{base}_model-{model_id}_")
             out = cv2.VideoWriter(temp_out.name, fourcc, fps, (width, height))
-            result_file = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
-            mask_video_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mkv')
             import json
             all_results = []
             model = init_model(model_id)
+            # model.set_classes(["person", "car", "truck"], model.get_text_pe(["person", "car", "truck"]))
             mask_out = cv2.VideoWriter(mask_video_file.name, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height), isColor=True)
             frame_idx = 0
             while True:
@@ -230,10 +257,13 @@ def app2():
                     mask_frame = detections.mask.astype(np.uint8) * 255
                 else:
                     mask_frame = np.zeros((height, width), dtype=np.uint8)
+                # Ensure mask_frame is 3D (height, width, 1) for grayscale video
                 if mask_frame.ndim == 2:
                     mask_frame = np.expand_dims(mask_frame, axis=-1)
+                # Convert to 3 channels for compatibility
                 mask_frame = np.repeat(mask_frame, 3, axis=-1)
                 mask_out.write(mask_frame)
+                # Save bboxes, class names, confidences as JSON
                 frame_result = {
                     "frame": frame_idx,
                     "bboxes": _get_det_field(detections, 'xyxy'),
@@ -245,9 +275,28 @@ def app2():
             cap.release()
             out.release()
             mask_out.release()
+            param_settings = {
+                "model_id": model_id,
+                "image_size": image_size,
+                "conf_thresh": conf_thresh,
+                "iou_thresh": iou_thresh,
+                "prompt_type": "Visual",
+                "texts": "person,car,truck"
+            }
             with open(result_file.name, 'w') as f:
-                json.dump(all_results, f)
-            return temp_out.name, result_file.name, mask_video_file.name
+                json.dump({"results": all_results, "params": param_settings}, f)
+            # Save model weights for download
+            if hasattr(model, 'save'):
+                model.save(model_save_path)
+            elif hasattr(model, 'state_dict'):
+                torch.save(model.state_dict(), model_save_path)
+            else:
+                # fallback: try saving the underlying model
+                try:
+                    torch.save(model.model.state_dict(), model_save_path)
+                except Exception:
+                    model_save_path = None
+            return temp_out.name, result_file.name, mask_video_file.name, model_save_path
 
         run_first_frame_visual.click(
             fn=process_first_frame_visual,
@@ -274,10 +323,13 @@ def app2():
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            temp_out = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+            base = os.path.splitext(os.path.basename(video))[0]
+            temp_out = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4', prefix=f"{base}_annotated_")
+            result_file = tempfile.NamedTemporaryFile(delete=False, suffix='.json', prefix=f"{base}_results_")
+            mask_video_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mkv', prefix=f"{base}_mask_")
+            model_save_path = f"/tmp/{base}_model-{model_id}_" + ''.join(random.choices('qwertyuiopasdfghjklzxcvbnmm1234567890', k=8)) + '.pt'
+            # model_save_path = tempfile.NamedTemporaryFile(delete=False, suffix='.pt', prefix=f"{base}_model-{model_id}_")
             out = cv2.VideoWriter(temp_out.name, fourcc, fps, (width, height))
-            result_file = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
-            mask_video_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mkv')
             import json
             all_results = []
             with open('tools/ram_tag_list.txt', 'r') as f:
@@ -303,10 +355,13 @@ def app2():
                     mask_frame = detections.mask.astype(np.uint8) * 255
                 else:
                     mask_frame = np.zeros((height, width), dtype=np.uint8)
+                # Ensure mask_frame is 3D (height, width, 1) for grayscale video
                 if mask_frame.ndim == 2:
                     mask_frame = np.expand_dims(mask_frame, axis=-1)
+                # Convert to 3 channels for compatibility
                 mask_frame = np.repeat(mask_frame, 3, axis=-1)
                 mask_out.write(mask_frame)
+                # Save bboxes, class names, confidences as JSON
                 frame_result = {
                     "frame": frame_idx,
                     "bboxes": _get_det_field(detections, 'xyxy'),
@@ -318,19 +373,51 @@ def app2():
             cap.release()
             out.release()
             mask_out.release()
+            param_settings = {
+                "model_id": model_id,
+                "image_size": image_size,
+                "conf_thresh": conf_thresh,
+                "iou_thresh": iou_thresh,
+                "prompt_type": "None",
+                "texts": ""
+            }
             with open(result_file.name, 'w') as f:
-                json.dump(all_results, f)
-            return temp_out.name, result_file.name, mask_video_file.name
+                json.dump({"results": all_results, "params": param_settings}, f)
+               
+            # Save model weights for download
+            if hasattr(model, 'save'):
+                model.save(model_save_path)
+            elif hasattr(model, 'state_dict'):
+                torch.save(model.state_dict(), model_save_path)
+            else:
+                # fallback: try saving the underlying model
+                try:
+                    torch.save(model.model.state_dict(), model_save_path)
+                except Exception:
+                    model_save_path = None
+            cap.release()
+            out.release()
+            # with open(result_file.name, 'wb') as f:
+            #     f.write(msgpack.packb(all_results))
+            return temp_out.name, result_file.name, mask_video_file.name, model_save_path
+
+        # Visual prompt handlers
+        run_full_video_visual.click(
+            fn=process_entire_video_visual,
+            inputs=[video_input, visual_prompt_type, model_id, image_size, conf_thresh, iou_thresh],
+            outputs=[output_video, output_json, output_mask_video, output_model_file],
+        )
 
         run_first_frame_pf.click(
             fn=process_first_frame_pf,
             inputs=[video_input, model_id, image_size, conf_thresh, iou_thresh],
             outputs=[output_image],
         )
+        # Prompt-Free handlers
         run_full_video_pf.click(
             fn=process_entire_video_pf,
             inputs=[video_input, model_id, image_size, conf_thresh, iou_thresh],
-            outputs=[output_video, output_json, output_mask_video],
+            outputs=[output_video, output_json, output_mask_video, output_model_file],
         )
 
 gradio_app2 = gr.Blocks()
@@ -344,4 +431,15 @@ with gradio_app2:
     app2()
 
 if __name__ == '__main__':
-    gradio_app2.launch(allowed_paths=["figures"], server_name="0.0.0.0", server_port=7860)#, share=True
+
+    parser = argparse.ArgumentParser(description="Launch YOLOE Gradio app.")
+    parser.add_argument("--port", type=int, default=7860, help="Port number to run the app on.")
+    parser.add_argument("--share", type=bool, default=False, help="Share the Gradio app publicly.")
+    args = parser.parse_args()
+
+    gradio_app2.launch(
+        allowed_paths=["figures"],
+        server_name="0.0.0.0",
+        server_port=args.port,
+        share=args.share
+    )
