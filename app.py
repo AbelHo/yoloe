@@ -8,6 +8,7 @@ from ultralytics.utils.torch_utils import smart_inference_mode
 from ultralytics.models.yolo.yoloe.predict_vp import YOLOEVPSegPredictor
 from gradio_image_prompter import ImagePrompter
 from huggingface_hub import hf_hub_download
+import argparse
 
 def init_model(model_id, is_pf=False):
     filename = f"{model_id}-seg.pt" if not is_pf else f"{model_id}-seg-pf.pt"
@@ -388,4 +389,15 @@ with gradio_app:
             app()
 
 if __name__ == '__main__':
-    gradio_app.launch(allowed_paths=["figures"])
+
+    parser = argparse.ArgumentParser(description="Launch YOLOE Gradio app.")
+    parser.add_argument("--port", type=int, default=7860, help="Port number to run the app on.")
+    parser.add_argument("--share", type=bool, default=False, help="Share the Gradio app publicly.")
+    args = parser.parse_args()
+
+    gradio_app.launch(
+        allowed_paths=["figures"],
+        server_name="0.0.0.0",
+        server_port=args.port,
+        share=args.share
+    )
