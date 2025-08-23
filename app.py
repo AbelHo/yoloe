@@ -9,6 +9,7 @@ from ultralytics.models.yolo.yoloe.predict_vp import YOLOEVPSegPredictor
 from gradio_image_prompter import ImagePrompter
 from huggingface_hub import hf_hub_download
 import argparse
+import random
 
 def init_model(model_id, is_pf=False):
     filename = f"{model_id}-seg.pt" if not is_pf else f"{model_id}-seg-pf.pt"
@@ -20,30 +21,41 @@ def init_model(model_id, is_pf=False):
 
 
 @smart_inference_mode()
-def yoloe_inference(image, prompts, target_image, model_id, image_size, conf_thresh, iou_thresh, prompt_type):
-    model = init_model(model_id)
+def yoloe_inference(image, prompts, target_image, model_id, image_size, conf_thresh, iou_thresh, prompt_type, model_upload):
     kwargs = {}
-    if prompt_type == "Text":
-        texts = prompts["texts"]
-        model.set_classes(texts, model.get_text_pe(texts))
-    elif prompt_type == "Visual":
-        kwargs = dict(
-            prompts=prompts,
-            predictor=YOLOEVPSegPredictor
-        )
-        if target_image:
-            model.predict(source=image, imgsz=image_size, conf=conf_thresh, iou=iou_thresh, return_vpe=True, **kwargs)
-            model.set_classes(["object0"], model.predictor.vpe)
-            model.predictor = None  # unset VPPredictor
-            image = target_image
-            kwargs = {}
-    elif prompt_type == "Prompt-free":
-        vocab = model.get_vocab(prompts["texts"])
-        model = init_model(model_id, is_pf=True)
-        model.set_vocab(vocab, names=prompts["texts"])
-        model.model.model[-1].is_fused = True
-        model.model.model[-1].conf = 0.001
-        model.model.model[-1].max_det = 1000
+    if model_upload is not None and model_upload != "":
+        print(f"Using uploaded model.......................")
+        model = model_upload
+        if prompt_type == "Visual":
+            kwargs = dict(
+                prompts=prompts,
+                predictor=YOLOEVPSegPredictor
+            )
+        #     model.set_classes(["object0"], model.predictor.vpe)
+        #     model.predictor = None  # unset VPPredictor
+    else:
+        model = init_model(model_id)
+        if prompt_type == "Text":
+            texts = prompts["texts"]
+            model.set_classes(texts, model.get_text_pe(texts))
+        elif prompt_type == "Visual":
+            kwargs = dict(
+                prompts=prompts,
+                predictor=YOLOEVPSegPredictor
+            )
+            if target_image:
+                model.predict(source=image, imgsz=image_size, conf=conf_thresh, iou=iou_thresh, return_vpe=True, **kwargs)
+                model.set_classes(["object0"], model.predictor.vpe)
+                model.predictor = None  # unset VPPredictor
+                image = target_image
+                kwargs = {}
+        elif prompt_type == "Prompt-free":
+            vocab = model.get_vocab(prompts["texts"])
+            model = init_model(model_id, is_pf=True)
+            model.set_vocab(vocab, names=prompts["texts"])
+            model.model.model[-1].is_fused = True
+            model.model.model[-1].conf = 0.001
+            model.model.model[-1].max_det = 1000
 
     results = model.predict(source=image, imgsz=image_size, conf=conf_thresh, iou=iou_thresh, **kwargs)
     detections = sv.Detections.from_ultralytics(results[0])
@@ -73,7 +85,7 @@ def yoloe_inference(image, prompts, target_image, model_id, image_size, conf_thr
         smart_position=True
     ).annotate(scene=annotated_image, detections=detections, labels=labels)
 
-    return annotated_image
+    return annotated_image, model
 
 
 def app():
@@ -141,6 +153,8 @@ def app():
 
             with gr.Column():
                 output_image = gr.Image(type="numpy", label="Annotated Image", visible=True)
+                output_model_file = gr.File(label="Download Model Used (PT)")
+                model_upload = gr.File(label="Upload Custom Model (.pt)")
 
         def update_text_image_visibility():
             return gr.update(value="Text"), gr.update(visible=True), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
@@ -198,7 +212,8 @@ def app():
             outputs=[target_image]
         )
 
-        def run_inference(raw_image, box_image, mask_image, target_image, texts, model_id, image_size, conf_thresh, iou_thresh, prompt_type, visual_prompt_type, visual_usage_type):
+        def run_inference(raw_image, box_image, mask_image, target_image, texts, model_id, image_size, conf_thresh, iou_thresh, prompt_type, visual_prompt_type, visual_usage_type, model_upload):
+            image = raw_image; prompts = {}; target_image = None
             # add text/built-in prompts
             if prompt_type == "Text" or prompt_type == "Prompt-free":
                 target_image = None
@@ -212,7 +227,7 @@ def app():
                     "texts": texts
                 }
             # add visual prompt
-            elif prompt_type == "Visual":
+            elif prompt_type == "Visual" and not(model_upload is not None and model_upload != ""):
                 if visual_usage_type != "Cross-Image":
                     target_image = None
                 if visual_prompt_type == "bboxes":
@@ -239,12 +254,34 @@ def app():
                         "masks": masks[None],
                         "cls": np.array([0])
                     }
-            return yoloe_inference(image, prompts, target_image, model_id, image_size, conf_thresh, iou_thresh, prompt_type)
+            # Use uploaded model if provided
+            model = None
+            if model_upload is not None and model_upload != "":
+                print("in 1.......................")
+                model_path = model_upload.name if hasattr(model_upload, 'name') else model_upload
+                # model = init_model(model_id)
+                # model = torch.load(model_path)
+                model = YOLOE(model_path)
+                model.eval()
+                model.to("cuda" if torch.cuda.is_available() else "cpu")
+            result, model = yoloe_inference(image, prompts, target_image, model_id, image_size, conf_thresh, iou_thresh, prompt_type, model)
+            # Save model weights for download
+            model_save_path = f"/tmp/model-{model_id}_" + ''.join(random.choices('qwertyuiopasdfghjklzxcvbnmm1234567890', k=8)) + '.pt'
+            if hasattr(model, 'save'):
+                model.save(model_save_path)
+            elif hasattr(model, 'state_dict'):
+                torch.save(model.state_dict(), model_save_path)
+            else:
+                try:
+                    torch.save(model.model.state_dict(), model_save_path)
+                except Exception:
+                    model_save_path = None
+            return result, model_save_path
 
         yoloe_infer.click(
             fn=run_inference,
-            inputs=[raw_image, box_image, mask_image, target_image, texts, model_id, image_size, conf_thresh, iou_thresh, prompt_type, visual_prompt_type, visual_usage_type],
-            outputs=[output_image],
+            inputs=[raw_image, box_image, mask_image, target_image, texts, model_id, image_size, conf_thresh, iou_thresh, prompt_type, visual_prompt_type, visual_usage_type, model_upload],
+            outputs=[output_image, output_model_file],
         )
 
         ###################### Examples ##########################
